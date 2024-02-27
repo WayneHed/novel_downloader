@@ -1,12 +1,13 @@
-import concurrent.futures
+import random
 import re
+import time
 from pathlib import Path
 
-import numpy
+import click
 from playwright.sync_api import sync_playwright, expect as ep
 from playwright.sync_api._generated import Page
 
-_SOURCE_URL = "https://www.bbiquge.org/"
+
 _OUTPUT_DIR = "./novels"
 
 
@@ -39,43 +40,95 @@ class NovelDownloader:
         """
         return self.context.new_page()
 
-    def search_novel(self, novel_name: str) -> dict:
+    def download_novel(self, novel_name: str) -> dict:
         """
-        在搜索页面搜索小说，返回搜索结果
-        :param novel_name: 目标小说名称
+        下载小说
+        :param novel_name: 小说名称
+        :return:
+        """
+        result = dict()
+        search_result = self._search_novel(novel_name)
+        if search_result["code"]:
+            file_path = f"{_OUTPUT_DIR}/{search_result['name']}_{search_result['author']}.txt"
+            file_handler = open(file_path, "a+", encoding="utf-8")
+            current_chapter_index = 1
+
+            is_went_wrong = False
+            page = self.get_page()
+            chapter_links = search_result["chapter_links"]
+            for chapter_link in chapter_links:
+                page.goto(chapter_link)
+                chapter_title_locator = page.locator("//div[@class='bookname']/h1")
+                chapter_content_locator = page.locator("//div[@id='content']")
+                try:
+                    ep(chapter_title_locator).to_be_visible()
+                    ep(chapter_content_locator).to_be_visible()
+                except AssertionError:
+                    is_went_wrong = True
+                    result["code"] = False
+                    result["message"] = f"未找到章节信息：{chapter_link}"
+                if not is_went_wrong:
+                    chapter_title = chapter_title_locator.inner_text().strip()
+                    chapter_content = chapter_content_locator.inner_text().replace(
+                        "\xa0", "").replace("\n\n", "\n").replace(useless_str, "").strip()
+                    if len(chapter_title) * len(chapter_content) > 0:
+                        file_handler.write(chapter_title)
+                        file_handler.write(chapter_content)
+                        file_handler.write('\n\n' + '-' * 10 + '\n\n')
+                        current_chapter_index += 1
+                        print(f"{chapter_title} 已下载完成！")
+                        if current_chapter_index % 10 == 0:
+                            file_handler.flush()
+                    else:
+                        is_went_wrong = True
+                        result["code"] = False
+                        result["message"] = f"章节内容为空：{chapter_title}"
+                if is_went_wrong:
+                    break
+                time.sleep(random.randint(1, 3))
+            file_handler.close()
+            if not is_went_wrong:
+                result["code"] = True
+                result["file_path"] = file_path
+                result["link"] = search_result["link"]
+                result["chapter_count"] = search_result["chapter_count"]
+                result["word_count"] = search_result["word_count"]
+                result["latest_chapter"] = search_result["latest_chapter"]
+            return result
+        else:
+            return search_result
+
+    def _search_novel(self, novel_name: str) -> dict:
+        """
+        搜索小说，返回搜索结果
+        :param novel_name:  小说名称
         :return:
         1. 成功返回示例：
             {
-                "code": "成功",
-                "payload":
-                    {
-                        "name": "novel_name",
-                        "link": "novel_website_link",
-                        "author": "author",
-                        "word_count": "1230万",
-                        "latest_chapter": "第123章"
-                        "latest_updated_time": "2023-09-23 12:30",
-                    }
+                "code": True,
+                "name": novel_name,
+                "link": novel_link,
+                "author": author,
+                "chapter_count": 123,
+                "chapter_links": [http://XXXX1, http://XXXX2]
+                "word_count": 1234万,
+                "latest_chapter": 第一章,
+                "latest_updated_time": 2023-09-23 12:30
             }
         2. 失败返回示例：
-            {
-                "code": "失败",
-                "payload":
-                    {
-                        "message": "error_message"
-                    }
+          {
+                "code": False,
+                "message": "error_message"
             }
         """
         result = dict()
-        error_payload = dict()
-        normal_payload = dict()
         is_went_wrong = False
         page = self.get_page()
         try:
             page.goto(self.source_url)
         except TimeoutError:
             is_went_wrong = True
-            error_payload["message"] = "访问网站超时"
+            result["message"] = "访问网站超时"
         if not is_went_wrong:
             search_input_locator = page.locator("//form/input[@name='searchkey']")
             search_submit_button_locator = page.locator("//form/button[@type='submit']")
@@ -84,7 +137,7 @@ class NovelDownloader:
                 ep(search_submit_button_locator).to_be_visible()
             except AssertionError:
                 is_went_wrong = True
-                error_payload["message"] = "未找到页面中的搜索栏"
+                result["message"] = "未找到页面中的搜索栏"
             if not is_went_wrong:
                 search_input_locator.fill(novel_name)
                 with page.expect_popup() as search_popup_info:
@@ -95,103 +148,46 @@ class NovelDownloader:
                     ep(novel_info_locator).to_be_visible()
                 except AssertionError:
                     is_went_wrong = True
+                    result["code"] = False
                     novel_list_locator = search_popup_page.locator("//div[@id='main']/div[@class='novelslistss']")
                     try:
                         ep(novel_list_locator).to_be_visible()
-                        error_payload["message"] = "找到多部小说，需明确小说名称"
+                        result["message"] = "找到多部小说，需明确小说名称"
                     except AssertionError:
-                        error_payload["message"] = "未找到小说信息"
+                        result["message"] = "未找到小说信息"
                 if not is_went_wrong:
-                    normal_payload["name"] = novel_info_locator.locator("h1").inner_text().strip()
-                    normal_payload["link"] = search_popup_page.url
+                    result["name"] = novel_info_locator.locator("h1").inner_text().strip()
+                    result["link"] = search_popup_page.url
                     for novel_info_item in novel_info_locator.locator("p").all():
                         item_text = novel_info_item.inner_text().strip()
                         if item_text.startswith("作者"):
-                            normal_payload["author"] = item_text[item_text.find("：") + 1:]
+                            result["author"] = item_text[item_text.find("：") + 1:]
                         if item_text.startswith("最新"):
-                            normal_payload["latest_chapter"] = item_text[item_text.find("：") + 1:]
+                            result["latest_chapter"] = item_text[item_text.find("：") + 1:]
                         if item_text.startswith("更新时间"):
                             matched = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}).*共(\d+万)字", item_text)
                             if matched:
-                                normal_payload["latest_updated_time"] = matched.group(1)
-                                normal_payload["word_count"] = matched.group(2)
+                                result["latest_updated_time"] = matched.group(1)
+                                result["word_count"] = matched.group(2)
                     chapter_links = list()
-                    for chapter_link_locator in search_popup_page.locator("//div[@id='list']/dl/center/following"
-                                                                          "-sibling::dd/a").all():
-                        chapter_links.append(page.url + chapter_link_locator.get_attribute("href"))
-                    normal_payload["chapter_links"] = chapter_links
-                    normal_payload["chapter_count"] = len(chapter_links)
-        if is_went_wrong:
-            result["code"] = "失败"
-            result["payload"] = error_payload
-        else:
-            result["code"] = "成功"
-            result["payload"] = normal_payload
+                    for chapter_link_locator in search_popup_page.locator(
+                            "//div[@id='list']/dl/center/following-sibling::dd/a").all():
+                        chapter_links.append(search_popup_page.url + chapter_link_locator.get_attribute("href"))
+                    result["chapter_links"] = chapter_links
+                    result["chapter_count"] = len(chapter_links)
+                    result["code"] = True
+                search_popup_page.close()
+        page.close()
         return result
 
-    def download_novel(self, novel_name: str, thread_number: int) -> dict:
-        search_result = self.search_novel(novel_name)
-        search_result_code = search_result["code"]
-        if search_result_code == "成功":
-            novel_info = dict(search_result["payload"])
-            chapter_links = list(novel_info["chapter_links"])
-            chapter_links_segments = [x.tolist() for x in numpy.array_split(chapter_links, thread_number)]
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=thread_number)
-            chapter_download_result = list()
-            for segment in chapter_links_segments:
-                chapter_download_result.append(
-                    executor.submit(self._download_chapters, self.get_page(), novel_name, segment))
-        else:
-            return search_result
 
-    def _download_chapters(self, page: Page, novel_name: str, chapter_links: list) -> dict:
-        """
-        按章节下载小说
-        :param page: 浏览器页面对象
-        :param novel_name: 小说名称
-        :param chapter_links: 章节链接列表
-        :return:
-        """
-        current_chapter_index = 1
-        useless_str = f"笔趣阁 www.bbiquge.org，最快更新{novel_name} ！"
-        start_chapter_link = str(chapter_links[0])
-        start_chapter_number = int(start_chapter_link[start_chapter_link.rfind("/") + 1:start_chapter_link.rfind(".")])
-        file_name = f"{novel_name}_{start_chapter_number}.txt"
-        file_path = _OUTPUT_DIR + "_" + file_name
-        f_handler = open(file_path, "w", encoding="utf-8")
-        is_went_wrong = False
-        for chapter_link in chapter_links:
-            page.goto(chapter_link)
-            chapter_title_locator = page.locator("//div[@class='bookname']/h1")
-            chapter_content_locator = page.locator("//div[@id='content']")
-            try:
-                ep(chapter_title_locator).to_be_visible()
-                ep(chapter_content_locator).to_be_visible()
-            except AssertionError:
-                is_went_wrong = True
-            if not is_went_wrong:
-                chapter_title = chapter_title_locator.inner_text().strip()
-                chapter_content = chapter_content_locator.inner_text().replace("\xa0", "").replace("\n\n",
-                                                                                                   "\n").replace(
-                    useless_str, "").strip()
-                if len(chapter_title) * len(chapter_content) > 0:
-                    f_handler.write(chapter_title)
-                    f_handler.write(chapter_content)
-                    f_handler.write('\n\n' + '-' * 10 + '\n\n')
-                    current_chapter_index += 1
-                    print(f"{chapter_title}已下载完成！")
-                    if current_chapter_index % 10 == 0:
-                        f_handler.flush()
-                else:
-                    is_went_wrong = True
-            if is_went_wrong:
-                break
-        f_handler.close()
-        if is_went_wrong:
-            return {"code": "失败", "payload": {"message": "下载失败"}}
-        else:
-            return {"code": "成功", "payload": {"file_path": file_path, "start_chapter_number": start_chapter_number}}
-
-if __name__ == '__main__':
-    downloader = NovelDownloader(headless=False, output_dir=Path(_OUTPUT_DIR), source_url=_SOURCE_URL)
-    print(downloader.search_novel("亏成首富"))
+@click.command()
+@click.argument("novel_name", type=str)
+@click.option("--headless", default=False, is_flag=True, help="是否显示浏览器")
+@click.option("-o", "--output_dir", default=_OUTPUT_DIR, help="输出目录")
+def cmd(novel_name, headless, output_dir):
+    output_dir = Path(output_dir)
+    if not output_dir.exists():
+        output_dir.mkdir(exist_ok=True, parents=True)
+    downloader = NovelDownloader(headless, output_dir, _SOURCE_URL)
+    downloader.download_novel(novel_name)
